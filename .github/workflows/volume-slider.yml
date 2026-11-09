@@ -21,36 +21,40 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        id: checkout
+        uses: actions/checkout@v7
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - name: Set up JDK 17
+        id: java
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Android SDK and required packages
+        id: android
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          packages: |-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
 
-      - name: Install Android SDK packages
-        run: |
-          set -euo pipefail
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
-
-      # Do not pass cache-provider: it is not a supported input for setup-gradle.
       - name: Set up Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
+        id: gradle_setup
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.13'
 
-      - name: Locate and extract project ZIP
+      - name: Locate and extract Android project
         id: unzip
         run: |
           set -euo pipefail
           shopt -s nullglob
           zips=( "$GITHUB_WORKSPACE"/*.zip )
           if (( ${#zips[@]} == 0 )); then
-            echo 'ERROR: No ZIP archive found in repository root.'
+            echo 'ERROR: No .zip file found in repository root.' >&2
             exit 1
           fi
           zip_file=''
@@ -60,7 +64,9 @@ jobs:
               break
             fi
           done
-          [[ -n "$zip_file" ]] || zip_file="${zips[0]}"
+          if [[ -z "$zip_file" ]]; then
+            zip_file="${zips[0]}"
+          fi
           echo "Using archive: $(basename "$zip_file")"
           unzip -t "$zip_file"
           project_root="$RUNNER_TEMP/volume-slider-project"
@@ -69,20 +75,20 @@ jobs:
           unzip -q "$zip_file" -d "$project_root"
           settings_file="$(find "$project_root" -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
           if [[ -z "$settings_file" ]]; then
-            echo 'ERROR: settings.gradle or settings.gradle.kts not found in ZIP.'
+            echo 'ERROR: settings.gradle(.kts) was not found in the ZIP.' >&2
             find "$project_root" -maxdepth 5 -type f -print
             exit 1
           fi
           project_dir="$(dirname "$settings_file")"
           if [[ ! -f "$project_dir/app/build.gradle" && ! -f "$project_dir/app/build.gradle.kts" ]]; then
-            echo 'ERROR: app module Gradle build file not found.'
-            find "$project_dir" -maxdepth 4 -type f -print
+            echo 'ERROR: app/build.gradle(.kts) was not found.' >&2
+            find "$project_dir" -maxdepth 5 -type f -print
             exit 1
           fi
           echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
           echo "Project root: $project_dir"
 
-      - name: Build debug APK (capture full compiler output)
+      - name: Build debug APK
         id: build
         run: |
           set -uo pipefail
@@ -94,56 +100,72 @@ jobs:
             gradle_cmd=( gradle )
           fi
           set +e
-          "${gradle_cmd[@]}" --no-daemon --stacktrace --info --console=plain :app:assembleDebug 2>&1 | tee "$RUNNER_TEMP/gradle-build.log"
+          "${gradle_cmd[@]}" --no-daemon --stacktrace --console=plain :app:assembleDebug 2>&1 | tee "$RUNNER_TEMP/gradle-build.log"
           result=${PIPESTATUS[0]}
           set -e
           if (( result != 0 )); then
-            echo "Gradle exited with code $result"
+            echo "Gradle exited with code $result" >&2
             exit "$result"
           fi
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
           mapfile -t apks < <(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/debug/*.apk' -print)
           if (( ${#apks[@]} == 0 )); then
-            echo 'ERROR: Build reported success but no debug APK was found.'
+            echo 'ERROR: Gradle succeeded but no debug APK was produced.' >&2
             exit 1
           fi
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
           for apk in "${apks[@]}"; do
             cp "$apk" "$GITHUB_WORKSPACE/artifacts/"
           done
 
       - name: Upload debug APK
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: volumeslider-debug
           path: artifacts/*.apk
           if-no-files-found: error
           retention-days: 14
 
-      - name: Write failure details to Summary
+      - name: Write diagnostics to job summary
         if: always()
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          JAVA_OUTCOME: ${{ steps.java.outcome }}
+          ANDROID_OUTCOME: ${{ steps.android.outcome }}
+          GRADLE_SETUP_OUTCOME: ${{ steps.gradle_setup.outcome }}
+          UNZIP_OUTCOME: ${{ steps.unzip.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
         run: |
           {
             echo '## Volume Slider build diagnostics'
             echo
+            echo '| Step | Result |'
+            echo '|---|---|'
+            echo "| Checkout | ${CHECKOUT_OUTCOME:-not run} |"
+            echo "| Java 17 setup | ${JAVA_OUTCOME:-not run} |"
+            echo "| Android SDK setup | ${ANDROID_OUTCOME:-not run} |"
+            echo "| Gradle setup | ${GRADLE_SETUP_OUTCOME:-not run} |"
+            echo "| ZIP extraction | ${UNZIP_OUTCOME:-not run} |"
+            echo "| APK compilation | ${BUILD_OUTCOME:-not run} |"
+            echo
             if [[ -f "$RUNNER_TEMP/gradle-build.log" ]]; then
-              echo '### Compiler and build errors'
+              echo '### Gradle errors'
               echo '```text'
               grep -n -E '(^e: | error: |What went wrong:|Execution failed for task|Unresolved reference|Type mismatch|Expecting )' "$RUNNER_TEMP/gradle-build.log" | tail -n 100 || true
               echo '```'
               echo
-              echo '### Last 160 log lines'
+              echo '### Last 120 Gradle log lines'
               echo '```text'
-              tail -n 160 "$RUNNER_TEMP/gradle-build.log"
+              tail -n 120 "$RUNNER_TEMP/gradle-build.log"
               echo '```'
             else
-              echo 'The Gradle build did not start. Check the failed setup step above.'
+              echo 'Gradle did not start. The failed step is identified in the table above; open that step in the Actions log for its exact error.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload full Gradle log on failure
+      - name: Upload Gradle log on failure
         if: failure() && steps.build.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: volume-slider-build-log
           path: ${{ runner.temp }}/gradle-build.log
