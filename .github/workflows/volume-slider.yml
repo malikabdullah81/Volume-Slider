@@ -29,8 +29,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Use the Android SDK already installed on GitHub's Ubuntu runner.
-      # This avoids the setup-android action step that failed in earlier runs.
       - name: Verify and prepare Android SDK
         shell: bash
         run: |
@@ -48,7 +46,7 @@ jobs:
           if [[ -z "$SDKMANAGER" ]]; then
             SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
           fi
-          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+          if [[ -z "$SDKMANAGER" \vert{}\vert{} ! -x "$SDKMANAGER" ]]; then
             echo "::error::sdkmanager was not found or is not executable under $ANDROID_HOME"
             find "$ANDROID_HOME" -maxdepth 5 -type f | head -100 || true
             exit 1
@@ -61,13 +59,6 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-
-      - name: Install Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          # AGP 8.7.3 is compatible with Gradle 8.x. Do not use the runner's
-          # unpinned latest Gradle (the previous logs showed Gradle 9.8.2).
-          gradle-version: '8.13'
 
       - name: Locate and extract Android project ZIP
         id: extract
@@ -121,14 +112,26 @@ jobs:
         run: |
           set -uo pipefail
           cd "$PROJECT_DIR"
-          gradle --version
+
+          # Use project's gradlew if available for correct AGP/Gradle version pairing
+          if [[ -f "./gradlew" ]]; then
+            chmod +x ./gradlew
+            GRADLE_CMD="./gradlew"
+          else
+            GRADLE_CMD="gradle"
+          fi
+
+          $GRADLE_CMD --version
           set +e
-          gradle --no-daemon --stacktrace --console=plain :app:assembleDebug \
+          $GRADLE_CMD --no-daemon --stacktrace --console=plain :app:assembleDebug \
             2>&1 | tee "$RUNNER_TEMP/gradle-build.log"
           build_status=${PIPESTATUS[0]}
           set -e
+
           if (( build_status != 0 )); then
             echo "::error::Gradle build failed with exit code $build_status"
+            echo "=== GRADLE BUILD ERROR LOG ==="
+            cat "$RUNNER_TEMP/gradle-build.log"
             exit "$build_status"
           fi
 
@@ -177,17 +180,10 @@ jobs:
             echo "| APK compilation | ${BUILD_OUTCOME:-not run} |"
             echo
             if [[ -f "$RUNNER_TEMP/gradle-build.log" ]]; then
-              echo '### Compiler and Gradle errors'
+              echo '### Kotlin & Gradle Compilation Errors'
               echo '```text'
-              grep -n -E '(^e: | error: |What went wrong:|Execution failed for task|Unresolved reference|Type mismatch|Expecting )' \
-                "$RUNNER_TEMP/gradle-build.log" | tail -n 100 || true
+              grep -n -E '(e: |error: |What went wrong:|Execution failed for task|Unresolved reference|Type mismatch|Unresolved reference:) *' \
+                "$RUNNER_TEMP/gradle-build.log" || true
               echo '```'
-              echo
-              echo '### Last 100 log lines'
-              echo '```text'
-              tail -n 100 "$RUNNER_TEMP/gradle-build.log"
-              echo '```'
-            else
-              echo 'Gradle did not start. Check the failed SDK or ZIP extraction step above.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
