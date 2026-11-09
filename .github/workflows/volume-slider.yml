@@ -113,7 +113,6 @@ jobs:
           set -uo pipefail
           cd "$PROJECT_DIR"
 
-          # Use project's gradlew if available for correct AGP/Gradle version pairing
           if [[ -f "./gradlew" ]]; then
             chmod +x ./gradlew
             GRADLE_CMD="./gradlew"
@@ -130,7 +129,6 @@ jobs:
 
           if (( build_status != 0 )); then
             echo "::error::Gradle build failed with exit code $build_status"
-            echo "=== GRADLE BUILD ERROR LOG ==="
             cat "$RUNNER_TEMP/gradle-build.log"
             exit "$build_status"
           fi
@@ -180,9 +178,9 @@ jobs:
             echo "| APK compilation | ${BUILD_OUTCOME:-not run} |"
             echo
             if [[ -f "$RUNNER_TEMP/gradle-build.log" ]]; then
-              echo '### Kotlin & Gradle Compilation Errors'
+              echo '### Compilation Errors'
               echo '```text'
-              grep -n -E '(e: |error: |What went wrong:|Execution failed for task|Unresolved reference|Type mismatch|Unresolved reference:) *' \
+              grep -n -E '(e: |error: |What went wrong:|Execution failed for task|Unresolved reference|Type mismatch) *' \
                 "$RUNNER_TEMP/gradle-build.log" || true
               echo '```'
             fi
