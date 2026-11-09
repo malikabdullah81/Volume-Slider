@@ -2,6 +2,8 @@ name: Volume Slider build
 
 on:
   push:
+    branches:
+      - main
     paths:
       - '*.zip'
       - '.github/workflows/volume-slider.yml'
@@ -35,7 +37,6 @@ jobs:
           set -euo pipefail
           if [[ ! -d "$ANDROID_HOME" ]]; then
             echo "::error::Android SDK directory not found: $ANDROID_HOME"
-            ls -la /usr/local/lib/android/ || true
             exit 1
           fi
 
@@ -46,18 +47,13 @@ jobs:
           if [[ -z "$SDKMANAGER" ]]; then
             SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
           fi
-          if [[ -z "$SDKMANAGER" \vert{}\vert{} ! -x "$SDKMANAGER" ]]; then
-            echo "::error::sdkmanager was not found or is not executable under $ANDROID_HOME"
-            find "$ANDROID_HOME" -maxdepth 5 -type f | head -100 || true
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager was not found or is not executable"
             exit 1
           fi
 
-          echo "Using sdkmanager: $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
       - name: Locate and extract Android project ZIP
@@ -82,29 +78,19 @@ jobs:
           if [[ -z "$zip_file" ]]; then zip_file="${zips[0]}"; fi
 
           echo "Using archive: $(basename "$zip_file")"
-          unzip -t "$zip_file"
           project_root="$RUNNER_TEMP/volume-slider-project"
           rm -rf "$project_root"
           mkdir -p "$project_root"
           unzip -q "$zip_file" -d "$project_root"
 
-          settings_file="$(find "$project_root" -type f \
-            \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
+          settings_file="$(find "$project_root" -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
           if [[ -z "$settings_file" ]]; then
-            echo '::error::settings.gradle(.kts) was not found inside the ZIP.'
-            find "$project_root" -maxdepth 5 -type f | head -100
+            echo '::error::settings.gradle was not found inside the ZIP.'
             exit 1
           fi
 
           project_dir="$(dirname "$settings_file")"
-          if [[ ! -f "$project_dir/app/build.gradle" && ! -f "$project_dir/app/build.gradle.kts" ]]; then
-            echo '::error::app/build.gradle(.kts) was not found beside the project settings file.'
-            find "$project_dir" -maxdepth 5 -type f | head -100
-            exit 1
-          fi
-
           echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
-          echo "Project root: $project_dir"
 
       - name: Build debug APK
         id: build
@@ -120,23 +106,11 @@ jobs:
             GRADLE_CMD="gradle"
           fi
 
-          $GRADLE_CMD --version
-          set +e
-          $GRADLE_CMD --no-daemon --stacktrace --console=plain :app:assembleDebug \
-            2>&1 | tee "$RUNNER_TEMP/gradle-build.log"
-          build_status=${PIPESTATUS[0]}
-          set -e
+          $GRADLE_CMD --no-daemon --stacktrace :app:assembleDebug
 
-          if (( build_status != 0 )); then
-            echo "::error::Gradle build failed with exit code $build_status"
-            cat "$RUNNER_TEMP/gradle-build.log"
-            exit "$build_status"
-          fi
-
-          mapfile -t apks < <(find "$PROJECT_DIR" -type f \
-            -path '*/build/outputs/apk/debug/*.apk' -print)
+          mapfile -t apks < <(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/debug/*.apk' -print)
           if (( ${#apks[@]} == 0 )); then
-            echo '::error::Gradle completed but no debug APK was produced.'
+            echo '::error::No debug APK produced.'
             exit 1
           fi
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
@@ -145,43 +119,9 @@ jobs:
           done
 
       - name: Upload debug APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: volumeslider-debug
           path: artifacts/*.apk
           if-no-files-found: error
           retention-days: 14
-
-      - name: Upload Gradle build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: volume-slider-build-log
-          path: ${{ runner.temp }}/gradle-build.log
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Add build diagnostics to Summary
-        if: always()
-        shell: bash
-        env:
-          EXTRACT_OUTCOME: ${{ steps.extract.outcome }}
-          BUILD_OUTCOME: ${{ steps.build.outcome }}
-        run: |
-          {
-            echo '## Volume Slider build diagnostics'
-            echo
-            echo '| Step | Result |'
-            echo '|---|---|'
-            echo "| ZIP extraction | ${EXTRACT_OUTCOME:-not run} |"
-            echo "| APK compilation | ${BUILD_OUTCOME:-not run} |"
-            echo
-            if [[ -f "$RUNNER_TEMP/gradle-build.log" ]]; then
-              echo '### Compilation Errors'
-              echo '```text'
-              grep -n -E '(e: |error: |What went wrong:|Execution failed for task|Unresolved reference|Type mismatch) *' \
-                "$RUNNER_TEMP/gradle-build.log" || true
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
