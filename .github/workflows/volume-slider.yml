@@ -104,9 +104,7 @@ jobs:
           set -uo pipefail
           cd "$PROJECT_DIR"
 
-          # Automatically generate the Gradle wrapper so build succeeds cleanly
           gradle wrapper --gradle-version 8.13
-
           chmod +x ./gradlew
           
           set +e
