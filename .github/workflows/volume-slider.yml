@@ -1,0 +1,55 @@
+name: Volume Slider build
+
+on:
+  push:
+    paths:
+      - '*.zip'
+      - .github/workflows/volume-slider.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show what is in the repo
+        run: |
+          echo "=== top folder ==="
+          ls -la
+          echo "=== zip files ==="
+          ls -la *.zip || echo "NO ZIP FILE IN THE TOP FOLDER"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.13
+
+      - name: Unzip project
+        run: |
+          ZIP=""
+          if [ -f VolumeSlider.zip ]; then ZIP=VolumeSlider.zip; else ZIP=$(ls *.zip 2>/dev/null | head -n1); fi
+          if [ -z "$ZIP" ]; then echo "ERROR: upload VolumeSlider.zip to the repo top folder"; exit 1; fi
+          echo "Using $ZIP"
+          rm -rf vs && mkdir vs
+          unzip -q "$ZIP" -d vs
+          SETTINGS=$(find vs -maxdepth 3 -name settings.gradle | head -n1)
+          if [ -z "$SETTINGS" ]; then echo "ERROR: no settings.gradle inside the zip"; find vs | head -50; exit 1; fi
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+          find "$(dirname "$SETTINGS")" -maxdepth 4 -type f | head -40
+
+      - name: Build debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --stacktrace --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: volumeslider-debug
+          path: vs/**/build/outputs/apk/debug/*.apk
