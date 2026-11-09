@@ -106,7 +106,19 @@ jobs:
             GRADLE_CMD="gradle"
           fi
 
-          $GRADLE_CMD --no-daemon --stacktrace :app:assembleDebug
+          set +e
+          $GRADLE_CMD --no-daemon --stacktrace :app:assembleDebug > build.log 2>&1
+          build_status=$?
+          set -e
+
+          if (( build_status != 0 )); then
+            echo "::error::Gradle build failed with exit code $build_status"
+            echo "=================================================="
+            echo "FULL GRADLE COMPILATION ERROR LOG:"
+            echo "=================================================="
+            cat build.log
+            exit "$build_status"
+          fi
 
           mapfile -t apks < <(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/debug/*.apk' -print)
           if (( ${#apks[@]} == 0 )); then
