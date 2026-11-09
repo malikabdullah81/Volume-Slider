@@ -14,12 +14,13 @@ jobs:
   build:
     name: Build Volume Slider APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -28,106 +29,130 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # GitHub's Ubuntu runner image already contains the Android SDK.
-      # Avoid android-actions/setup-android, which is the failing step
-      # in the current run.
-      - name: Verify preinstalled Android SDK
+      # Use the Android SDK already installed on GitHub's Ubuntu runner.
+      # This avoids the setup-android action step that failed in earlier runs.
+      - name: Verify and prepare Android SDK
         shell: bash
         run: |
           set -euo pipefail
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          if [ ! -d "$ANDROID_HOME" ]; then
-            echo "::error::Android SDK directory not found at $ANDROID_HOME"
-            echo "Available SDK-related directories:"
+          if [[ ! -d "$ANDROID_HOME" ]]; then
+            echo "::error::Android SDK directory not found: $ANDROID_HOME"
             ls -la /usr/local/lib/android/ || true
             exit 1
           fi
 
-          SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager -perm -u+x 2>/dev/null | head -n1)"
-          if [ -z "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager was not found in the preinstalled Android SDK"
-            find "$ANDROID_HOME" -maxdepth 4 -type f | head -100
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [[ -z "$SDKMANAGER" && -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [[ -z "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          fi
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager was not found or is not executable under $ANDROID_HOME"
+            find "$ANDROID_HOME" -maxdepth 5 -type f | head -100 || true
             exit 1
           fi
 
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-          echo "Found sdkmanager: $SDKMANAGER"
-          "$SDKMANAGER" --version
-
-      - name: Accept Android SDK licenses and install common packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
           "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-35" \
-            "platforms;android-36" \
-            "build-tools;35.0.0" \
-            "build-tools;36.0.0"
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+            "build-tools;35.0.0"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
-      - name: Locate and extract project ZIP
+      - name: Install Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # AGP 8.7.3 is compatible with Gradle 8.x. Do not use the runner's
+          # unpinned latest Gradle (the previous logs showed Gradle 9.8.2).
+          gradle-version: '8.13'
+
+      - name: Locate and extract Android project ZIP
         id: extract
         shell: bash
         run: |
           set -euo pipefail
-          echo "Repository contents:"
-          ls -la
-
-          ZIP=""
-          if [ -f "VolumeSlider.zip" ]; then
-            ZIP="VolumeSlider.zip"
-          else
-            ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
-          fi
-
-          if [ -z "$ZIP" ]; then
-            echo "::error::No project ZIP found in the repository root."
+          shopt -s nullglob
+          zips=( "$GITHUB_WORKSPACE"/*.zip )
+          if (( ${#zips[@]} == 0 )); then
+            echo '::error::No project ZIP found in the repository root.'
             exit 1
           fi
 
-          echo "Using project archive: $ZIP"
-          rm -rf vs
-          mkdir -p vs
-          unzip -q "$ZIP" -d vs
+          zip_file=''
+          for candidate in "${zips[@]}"; do
+            if [[ "$(basename "$candidate")" == 'VolumeSlider.zip' ]]; then
+              zip_file="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$zip_file" ]]; then zip_file="${zips[0]}"; fi
 
-          SETTINGS="$(find vs -maxdepth 5 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
-          if [ -z "$SETTINGS" ]; then
-            echo "::error::No settings.gradle or settings.gradle.kts found inside the ZIP."
-            find vs -maxdepth 5 -type f | head -100
+          echo "Using archive: $(basename "$zip_file")"
+          unzip -t "$zip_file"
+          project_root="$RUNNER_TEMP/volume-slider-project"
+          rm -rf "$project_root"
+          mkdir -p "$project_root"
+          unzip -q "$zip_file" -d "$project_root"
+
+          settings_file="$(find "$project_root" -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
+          if [[ -z "$settings_file" ]]; then
+            echo '::error::settings.gradle(.kts) was not found inside the ZIP.'
+            find "$project_root" -maxdepth 5 -type f | head -100
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$SETTINGS")"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project root: $PROJECT_DIR"
-          find "$PROJECT_DIR" -maxdepth 3 -type f | sort | head -120
+          project_dir="$(dirname "$settings_file")"
+          if [[ ! -f "$project_dir/app/build.gradle" && ! -f "$project_dir/app/build.gradle.kts" ]]; then
+            echo '::error::app/build.gradle(.kts) was not found beside the project settings file.'
+            find "$project_dir" -maxdepth 5 -type f | head -100
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
+          echo "Project root: $project_dir"
 
       - name: Build debug APK
+        id: build
         shell: bash
         run: |
-          set -o pipefail
+          set -uo pipefail
           cd "$PROJECT_DIR"
+          gradle --version
+          set +e
+          gradle --no-daemon --stacktrace --console=plain :app:assembleDebug \
+            2>&1 | tee "$RUNNER_TEMP/gradle-build.log"
+          build_status=${PIPESTATUS[0]}
+          set -e
+          if (( build_status != 0 )); then
+            echo "::error::Gradle build failed with exit code $build_status"
+            exit "$build_status"
+          fi
 
-          if [ -f ./gradlew ]; then
-            chmod +x ./gradlew
-            ./gradlew :app:assembleDebug --stacktrace --no-daemon --console=plain
-          else
-            gradle :app:assembleDebug --stacktrace --no-daemon --console=plain
-          fi 2>&1 | tee "$RUNNER_TEMP/gradle-build.log"
+          mapfile -t apks < <(find "$PROJECT_DIR" -type f \
+            -path '*/build/outputs/apk/debug/*.apk' -print)
+          if (( ${#apks[@]} == 0 )); then
+            echo '::error::Gradle completed but no debug APK was produced.'
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          for apk in "${apks[@]}"; do
+            cp "$apk" "$GITHUB_WORKSPACE/artifacts/"
+          done
 
       - name: Upload debug APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: volumeslider-debug
-          path: |
-            vs/**/build/outputs/apk/debug/*.apk
+          path: artifacts/*.apk
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build log
+      - name: Upload Gradle build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -136,25 +161,33 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Add failure details to Summary
-        if: failure()
+      - name: Add build diagnostics to Summary
+        if: always()
         shell: bash
+        env:
+          EXTRACT_OUTCOME: ${{ steps.extract.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
         run: |
           {
-            echo "## Volume Slider build failed"
+            echo '## Volume Slider build diagnostics'
             echo
-            echo "Failed step: check the red step above for its complete output."
+            echo '| Step | Result |'
+            echo '|---|---|'
+            echo "| ZIP extraction | ${EXTRACT_OUTCOME:-not run} |"
+            echo "| APK compilation | ${BUILD_OUTCOME:-not run} |"
             echo
-            if [ -f "$RUNNER_TEMP/gradle-build.log" ]; then
-              echo "### Gradle errors"
+            if [[ -f "$RUNNER_TEMP/gradle-build.log" ]]; then
+              echo '### Compiler and Gradle errors'
+              echo '```text'
+              grep -n -E '(^e: | error: |What went wrong:|Execution failed for task|Unresolved reference|Type mismatch|Expecting )' \
+                "$RUNNER_TEMP/gradle-build.log" | tail -n 100 || true
               echo '```'
-              grep -E '(^e: | error: |FAILURE:|What went wrong:|Could not )' "$RUNNER_TEMP/gradle-build.log" | tail -80 || true
-              echo '```'
-              echo "### Last 80 log lines"
-              echo '```'
-              tail -n 80 "$RUNNER_TEMP/gradle-build.log"
+              echo
+              echo '### Last 100 log lines'
+              echo '```text'
+              tail -n 100 "$RUNNER_TEMP/gradle-build.log"
               echo '```'
             else
-              echo "Gradle did not start; inspect the failed SDK or ZIP setup step above."
+              echo 'Gradle did not start. Check the failed SDK or ZIP extraction step above.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
