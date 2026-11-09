@@ -97,27 +97,28 @@ jobs:
           project_dir="$(dirname "$settings_file")"
           echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
 
-      - name: Build debug APK
+      - name: Generate Gradle Wrapper and Build debug APK
         id: build
         shell: bash
         run: |
           set -uo pipefail
           cd "$PROJECT_DIR"
 
-          if [[ -f "./gradlew" ]]; then
-            chmod +x ./gradlew
-            GRADLE_CMD="./gradlew"
-          else
-            GRADLE_CMD="gradle"
-          fi
+          # Automatically generate the Gradle wrapper so build succeeds cleanly
+          gradle wrapper --gradle-version 8.13
 
+          chmod +x ./gradlew
+          
           set +e
-          $GRADLE_CMD --no-daemon --stacktrace :app:assembleDebug > build.log 2>&1
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug > build.log 2>&1
           build_status=$?
           set -e
 
           if (( build_status != 0 )); then
             echo "::error::Gradle build failed with exit code $build_status"
+            echo "=================================================="
+            echo "FULL GRADLE COMPILATION ERROR LOG:"
+            echo "=================================================="
             cat build.log
             exit "$build_status"
           fi
@@ -139,4 +140,3 @@ jobs:
           path: artifacts/*.apk
           if-no-files-found: error
           retention-days: 14
- 
