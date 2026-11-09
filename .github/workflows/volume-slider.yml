@@ -1,0 +1,174 @@
+name: Volume Slider build
+
+on:
+  push:
+    paths:
+      - '*.zip'
+      - '**/*.zip'
+      - '.github/workflows/volume-slider.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Initialize diagnostic log
+        id: init_log
+        shell: bash
+        run: |
+          : > "$RUNNER_TEMP/build.log"
+          {
+            echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Runner: $RUNNER_OS / $RUNNER_ARCH"
+          } | tee -a "$RUNNER_TEMP/build.log"
+
+      - name: Check out repository
+        id: checkout
+        uses: actions/checkout@v7
+
+      - name: Find and extract Android project
+        id: unzip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo '=== Repository root ==='
+            ls -la
+
+            ZIP=''
+            if [[ -f 'VolumeSlider.zip' ]]; then
+              ZIP='VolumeSlider.zip'
+            else
+              ZIP="$(find . -maxdepth 1 -type f -iname '*.zip' -printf '%f\n' | sort | head -n 1)"
+            fi
+
+            if [[ -z "$ZIP" ]]; then
+              echo 'ERROR: No .zip archive was found in the repository root.'
+              exit 1
+            fi
+
+            echo "Using archive: $ZIP"
+            echo '=== ZIP integrity check ==='
+            unzip -tq "$ZIP"
+
+            rm -rf vs
+            mkdir -p vs
+            unzip -q "$ZIP" -d vs
+
+            echo '=== Extracted project files (first 100) ==='
+            find vs -maxdepth 5 -type f | sort | head -n 100
+
+            SETTINGS="$(find vs -type f \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -printf '%d\t%p\n' | sort -n | head -n 1 | cut -f 2-)"
+
+            if [[ -z "$SETTINGS" ]]; then
+              echo 'ERROR: No settings.gradle or settings.gradle.kts was found in the archive.'
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "$SETTINGS")"
+            if [[ ! -f "$PROJECT_DIR/build.gradle" && ! -f "$PROJECT_DIR/build.gradle.kts" && ! -f "$PROJECT_DIR/gradlew" ]]; then
+              echo "ERROR: Found $SETTINGS, but its project directory has no root build.gradle(.kts) or gradlew."
+              exit 1
+            fi
+
+            echo "Project directory: $PROJECT_DIR"
+            echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          } 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+
+      - name: Set up Java 21
+        id: setup_java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        id: setup_android
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle
+        id: setup_gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # Used only when the project has no Gradle wrapper; gradlew takes priority below.
+          gradle-version: '8.13'
+
+      - name: Build debug APK
+        id: build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo '=== Java ==='
+            java -version
+            echo '=== Gradle available on PATH ==='
+            gradle --version
+            echo '=== Build ==='
+
+            cd "$PROJECT_DIR"
+            if [[ -f './gradlew' ]]; then
+              chmod +x ./gradlew
+              ./gradlew assembleDebug --stacktrace --no-daemon --console=plain
+            else
+              echo 'Gradle wrapper not found; using the provisioned Gradle 8.13.'
+              gradle assembleDebug --stacktrace --no-daemon --console=plain
+            fi
+          } 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+
+      - name: Upload debug APK
+        id: upload_apk
+        uses: actions/upload-artifact@v7
+        with:
+          name: volumeslider-debug
+          path: vs/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write build diagnostics to Summary
+        id: diagnostics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Volume Slider build diagnostics'
+            echo
+            echo '| Step | Result |'
+            echo '|---|---|'
+            echo '| Initialize log | ${{ steps.init_log.outcome || 'not run' }} |'
+            echo '| Checkout | ${{ steps.checkout.outcome || 'not run' }} |'
+            echo '| Find and extract project | ${{ steps.unzip.outcome || 'not run' }} |'
+            echo '| Set up Java | ${{ steps.setup_java.outcome || 'not run' }} |'
+            echo '| Set up Android SDK | ${{ steps.setup_android.outcome || 'not run' }} |'
+            echo '| Set up Gradle | ${{ steps.setup_gradle.outcome || 'not run' }} |'
+            echo '| Build debug APK | ${{ steps.build.outcome || 'not run' }} |'
+            echo '| Upload APK | ${{ steps.upload_apk.outcome || 'not run' }} |'
+            echo
+
+            if [[ "${{ job.status }}" == 'success' ]]; then
+              echo '### Build succeeded'
+              echo 'Download the `volumeslider-debug` artifact from this workflow run.'
+            else
+              echo '### Build failed'
+              if [[ -s "$RUNNER_TEMP/build.log" ]]; then
+                echo '#### Detected errors'
+                echo '```text'
+                grep -E '(^e: |^ERROR:|^FAILURE:|What went wrong:|Execution failed for task|Could not resolve|SDK location not found)' \
+                  "$RUNNER_TEMP/build.log" | tail -n 40 || true
+                echo '```'
+                echo '#### Last 70 log lines'
+                echo '```text'
+                tail -n 70 "$RUNNER_TEMP/build.log"
+                echo '```'
+              else
+                echo 'The failure happened before a shell step could write to the diagnostic log. Use the step-result table above, then open the first failed setup step in the Actions job to read its action log.'
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
