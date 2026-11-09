@@ -50,20 +50,19 @@ jobs:
           fi
           if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
             echo "::error::sdkmanager was not found or is not executable"
-            find "$ANDROID_HOME" -maxdepth 4 -type f | head -100 || true
+            find "$ANDROID_HOME" -maxdepth 5 -type f | head -100 || true
             exit 1
           fi
 
           echo "Using SDK manager: $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          # sdkmanager installs normal SDK packages when package IDs are positional arguments.
-          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;36.0.0"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
-      - name: Set up Gradle 8.13
+      - name: Set up Gradle 9.9.0
         uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '8.13'
+          gradle-version: '9.9.0'
 
       - name: Locate and extract Android project ZIP
         id: extract
@@ -105,7 +104,7 @@ jobs:
           echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
           echo "Project root: $project_dir"
 
-      - name: Build debug APK with Gradle 8.13
+      - name: Build debug APK with Gradle 9.9.0
         id: build
         shell: bash
         run: |
@@ -127,14 +126,16 @@ jobs:
 
           mapfile -t apks < <(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/debug/*.apk' -print)
           if (( ${#apks[@]} == 0 )); then
-            echo '::error::Gradle completed but no debug APK was produced.'
+            echo '::error::Gradle completed successfully but no debug APK was found.'
+            find "$PROJECT_DIR" -type f -path '*/build/outputs/*' -print | head -100 || true
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           for apk in "${apks[@]}"; do
-            cp "$apk" "$GITHUB_WORKSPACE/artifacts/"
+            cp "$apk" "$GITHUB_WORKSPACE/artifacts/VolumeSlider-debug.apk"
           done
+          echo "APK created:"
           ls -lah "$GITHUB_WORKSPACE/artifacts"
 
       - name: Upload debug APK
@@ -142,7 +143,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: volumeslider-debug
-          path: artifacts/*.apk
+          path: artifacts/VolumeSlider-debug.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -155,24 +156,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Add failure details to Summary
-        if: failure()
+      - name: Add build result to Summary
+        if: always()
         shell: bash
         run: |
           {
-            echo '## Volume Slider build failed'
+            echo '## Volume Slider build result'
             echo
-            if [[ -f "$RUNNER_TEMP/gradle-build.log" ]]; then
-              echo '### Compiler and Gradle error matches'
+            if [[ -f "$GITHUB_WORKSPACE/artifacts/VolumeSlider-debug.apk" ]]; then
+              echo '✅ Debug APK generated successfully.'
+              echo 'Download the `volumeslider-debug` artifact from this workflow run.'
+            elif [[ -f "$RUNNER_TEMP/gradle-build.log" ]]; then
+              echo '❌ Build did not produce an APK. Compiler and Gradle errors:'
               echo '```text'
               grep -E '(^e: | error: |FAILURE:|What went wrong:|Could not )' "$RUNNER_TEMP/gradle-build.log" | tail -100 || true
               echo '```'
               echo
-              echo '### Last 100 log lines'
+              echo 'Last 80 log lines:'
               echo '```text'
-              tail -n 100 "$RUNNER_TEMP/gradle-build.log"
+              tail -n 80 "$RUNNER_TEMP/gradle-build.log"
               echo '```'
             else
-              echo 'Gradle did not start. Inspect the failed setup or ZIP extraction step in the job log.'
+              echo '❌ Build stopped before Gradle started. Inspect the failed setup step above.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
