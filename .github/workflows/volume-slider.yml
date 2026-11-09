@@ -75,7 +75,7 @@ jobs:
 
           zip_file=''
           for candidate in "${zips[@]}"; do
-            if [[ "$(basename "$candidate")" == 'VolumeSlider.zip' ]]; then
+            if [[ "$(basename "$candidate")" == 'VolumeSlider.zip' ]] || [[ "$(basename "$candidate")" == 'VolumeSlider-Fixed.zip' ]] || [[ "$(basename "$candidate")" == 'VolumeSlider-Fixed_2.zip' ]]; then
               zip_file="$candidate"
               break
             fi
@@ -97,33 +97,14 @@ jobs:
           project_dir="$(dirname "$settings_file")"
           echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
 
-      - name: Build debug APK
+      - name: Build debug APK with Verbose Logging
         id: build
         shell: bash
         run: |
           set -uo pipefail
           cd "$PROJECT_DIR"
 
-          if [[ -f "./gradlew" ]]; then
-            chmod +x ./gradlew
-            GRADLE_CMD="./gradlew"
-          else
-            GRADLE_CMD="gradle"
-          fi
-
-          set +e
-          $GRADLE_CMD --no-daemon --stacktrace :app:assembleDebug > build.log 2>&1
-          build_status=$?
-          set -e
-
-          if (( build_status != 0 )); then
-            echo "::error::Gradle build failed with exit code $build_status"
-            echo "=================================================="
-            echo "FULL GRADLE COMPILATION ERROR LOG:"
-            echo "=================================================="
-            cat build.log
-            exit "$build_status"
-          fi
+          gradle --no-daemon --stacktrace --info :app:assembleDebug
 
           mapfile -t apks < <(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/debug/*.apk' -print)
           if (( ${#apks[@]} == 0 )); then
